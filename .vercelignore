@@ -1,0 +1,25 @@
+# Local development server
+server.ts
+
+# Development files
+*.local
+.env.local
+.env.development
+
+# Documentation
+*.md
+!README.md
+
+# Test files
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+
+# IDE files
+.vscode
+.idea
+
+# Postman collections (optional, but not needed for deployment)
+*.postman_collection.json
+
