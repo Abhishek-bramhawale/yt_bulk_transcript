@@ -10,6 +10,7 @@ import {
   Image,
   Loader,
   Paper,
+  Radio,
   ScrollArea,
   SimpleGrid,
   Stack,
@@ -31,13 +32,16 @@ import {
   IconDownload,
   IconLoader2,
   IconSearch,
+  IconSparkles,
 } from "@tabler/icons-react";
+import { openAiWithPrompt, type AiProvider } from "@/lib/open-ai";
 import {
   SAMPLE_VIDEOS,
   extractVideoId,
   thumbnailUrl,
   type TranscriptApiResponse,
   type TranscriptSegment,
+  type TranscriptSource,
 } from "@/lib/transcript";
 
 type JobStatus = "queued" | "loading" | "done" | "error";
@@ -54,6 +58,7 @@ type TranscriptJob = {
   segments: TranscriptSegment[];
   rawText: string;
   error: string | null;
+  source: TranscriptSource | null;
 };
 
 function parseUrlList(text: string): string[] {
@@ -79,6 +84,22 @@ function segmentsToPlain(segments: TranscriptSegment[], withTimestamps: boolean)
   return segments.map((s) => s.text).join(" ");
 }
 
+function SourceBadge({ source }: { source: TranscriptSource | null }) {
+  if (!source) return null;
+  if (source === "library") {
+    return (
+      <Badge size="xs" color="violet" variant="light">
+        Library (youtube-transcript-plus)
+      </Badge>
+    );
+  }
+  return (
+    <Badge size="xs" color="blue" variant="light">
+      Website (youtube-transcript.ai)
+    </Badge>
+  );
+}
+
 export function TranscriptApp() {
   const [urlText, setUrlText] = useState("");
   const [jobs, setJobs] = useState<TranscriptJob[]>([]);
@@ -86,6 +107,8 @@ export function TranscriptApp() {
   const [filter, setFilter] = useState("");
   const [showTimestamps, setShowTimestamps] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [aiProvider, setAiProvider] = useState<AiProvider>("chatgpt");
 
   const doneJobs = useMemo(
     () => jobs.filter((j) => j.status === "done" && j.segments.length > 0),
@@ -100,6 +123,47 @@ export function TranscriptApp() {
 
   function updateJob(id: string, patch: Partial<TranscriptJob>) {
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...patch } : j)));
+  }
+
+  function combinedTranscripts() {
+    return doneJobs
+      .map((j) => {
+        const body = segmentsToPlain(j.segments, showTimestamps);
+        return `## ${j.title}\n${body}`;
+      })
+      .join("\n\n");
+  }
+
+  async function sendToAi(provider: AiProvider, prompt: string) {
+    const mode = await openAiWithPrompt(provider, prompt);
+    if (mode === "clipboard") {
+      notifications.show({
+        title: "Prompt copied",
+        message: "Text was too long for the URL — pasted to clipboard. Paste into the chat (Ctrl+V).",
+        color: "yellow",
+        autoClose: 4500,
+      });
+    }
+  }
+
+  async function summarizeOne(job: TranscriptJob, provider: "chatgpt" | "claude") {
+    const body = segmentsToPlain(job.segments, showTimestamps);
+    const prompt = `summarize\n\n${job.title}\n\n${body}`;
+    await sendToAi(provider, prompt);
+  }
+
+  async function runCustomPrompt() {
+    if (!doneJobs.length) {
+      notifications.show({
+        message: "Fetch at least one transcript first.",
+        color: "red",
+        autoClose: 2500,
+      });
+      return;
+    }
+    const prefix = customPrompt.trim() || "summarize";
+    const prompt = `${prefix}\n\n${combinedTranscripts()}`;
+    await sendToAi(aiProvider, prompt);
   }
 
   async function fetchOne(job: TranscriptJob) {
@@ -130,6 +194,7 @@ export function TranscriptApp() {
         thumbnail: payload.thumbnail || thumbnailUrl(payload.videoId),
         segments: payload.segments,
         rawText: payload.rawText,
+        source: payload.source ?? null,
         error: null,
       });
     } catch (err) {
@@ -138,6 +203,7 @@ export function TranscriptApp() {
         error: err instanceof Error ? err.message : "Failed to load transcript.",
         segments: [],
         rawText: "",
+        source: null,
       });
     }
   }
@@ -166,13 +232,13 @@ export function TranscriptApp() {
         segments: [],
         rawText: "",
         error: null,
+        source: null,
       };
     });
 
     setJobs(nextJobs);
     setBulkRunning(true);
 
-    // Process sequentially so cards fill in one-by-one
     for (const job of nextJobs) {
       await fetchOne(job);
     }
@@ -226,6 +292,13 @@ export function TranscriptApp() {
     link.click();
     URL.revokeObjectURL(link.href);
   }
+
+  const inputStyles = {
+    input: {
+      background: "var(--mantine-color-dark-6)",
+      borderColor: "var(--mantine-color-dark-4)",
+    },
+  };
 
   return (
     <Box w="100%" mih="100vh" px={{ base: "md", md: "xl" }} py="lg">
@@ -305,8 +378,7 @@ export function TranscriptApp() {
                 onChange={(e) => setUrlText(e.currentTarget.value)}
                 styles={{
                   input: {
-                    background: "var(--mantine-color-dark-6)",
-                    borderColor: "var(--mantine-color-dark-4)",
+                    ...inputStyles.input,
                     fontFamily: "var(--font-geist-mono), monospace",
                     fontSize: 13,
                   },
@@ -361,114 +433,165 @@ export function TranscriptApp() {
 
         {jobs.length > 0 && (
           <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg" w="100%">
-            {/* Left: thumbnails / job list + copy */}
-            <Paper
-              p="md"
-              withBorder
-              style={{
-                background: "var(--mantine-color-dark-8)",
-                borderColor: "var(--mantine-color-dark-5)",
-                alignSelf: "start",
-              }}
-            >
-              <Stack gap="md">
-                <Group justify="space-between">
-                  <Text fw={600} size="sm">
-                    Videos ({jobs.length})
-                  </Text>
-                  <Tooltip label="Copy every finished transcript">
-                    <Button
-                      size="xs"
-                      color="youtube"
-                      variant="light"
-                      leftSection={<IconCopy size={14} />}
-                      disabled={!doneJobs.length}
-                      onClick={() => void copyAllTranscripts()}
-                    >
-                      Copy All
-                    </Button>
-                  </Tooltip>
-                </Group>
-
-                <ScrollArea.Autosize mah="70vh" type="auto" offsetScrollbars>
-                  <Stack gap="sm" pr={4}>
-                    {jobs.map((job) => (
-                      <Paper
-                        key={job.id}
-                        p="sm"
-                        radius="md"
-                        style={{
-                          background: "var(--mantine-color-dark-7)",
-                          border:
-                            job.status === "error"
-                              ? "1px solid rgba(239,68,68,0.4)"
-                              : "1px solid transparent",
-                        }}
+            {/* Left: videos + custom AI prompt */}
+            <Stack gap="md" style={{ alignSelf: "start" }}>
+              <Paper
+                p="md"
+                withBorder
+                style={{
+                  background: "var(--mantine-color-dark-8)",
+                  borderColor: "var(--mantine-color-dark-5)",
+                }}
+              >
+                <Stack gap="md">
+                  <Group justify="space-between">
+                    <Text fw={600} size="sm">
+                      Videos ({jobs.length})
+                    </Text>
+                    <Tooltip label="Copy every finished transcript">
+                      <Button
+                        size="xs"
+                        color="youtube"
+                        variant="light"
+                        leftSection={<IconCopy size={14} />}
+                        disabled={!doneJobs.length}
+                        onClick={() => void copyAllTranscripts()}
                       >
-                        <Group gap="sm" wrap="nowrap" align="flex-start">
-                          <Image
-                            src={job.thumbnail}
-                            alt=""
-                            w={120}
-                            h={68}
-                            radius="sm"
-                            fit="cover"
-                            style={{ flexShrink: 0 }}
-                          />
-                          <Box style={{ minWidth: 0, flex: 1 }}>
-                            <Text fw={600} size="sm" lineClamp={2}>
-                              {job.title}
-                            </Text>
-                            <Group gap={6} mt={4}>
-                              {job.status === "queued" && (
-                                <Badge size="xs" color="gray" variant="light">
-                                  Queued
-                                </Badge>
-                              )}
-                              {job.status === "loading" && (
-                                <Badge
-                                  size="xs"
-                                  color="yellow"
-                                  variant="light"
-                                  leftSection={<Loader size={10} color="yellow" />}
-                                >
-                                  Fetching…
-                                </Badge>
-                              )}
-                              {job.status === "done" && (
-                                <Badge
-                                  size="xs"
-                                  color="teal"
-                                  variant="light"
-                                  leftSection={<IconCheck size={10} />}
-                                >
-                                  {job.segments.length} lines
-                                </Badge>
-                              )}
-                              {job.status === "error" && (
-                                <Badge size="xs" color="red" variant="light">
-                                  Failed
-                                </Badge>
-                              )}
-                              {job.language && (
-                                <Text size="xs" c="dimmed">
-                                  {job.language}
+                        Copy All
+                      </Button>
+                    </Tooltip>
+                  </Group>
+
+                  <ScrollArea.Autosize mah="42vh" type="auto" offsetScrollbars>
+                    <Stack gap="sm" pr={4}>
+                      {jobs.map((job) => (
+                        <Paper
+                          key={job.id}
+                          p="sm"
+                          radius="md"
+                          style={{
+                            background: "var(--mantine-color-dark-7)",
+                            border:
+                              job.status === "error"
+                                ? "1px solid rgba(239,68,68,0.4)"
+                                : "1px solid transparent",
+                          }}
+                        >
+                          <Group gap="sm" wrap="nowrap" align="flex-start">
+                            <Image
+                              src={job.thumbnail}
+                              alt=""
+                              w={120}
+                              h={68}
+                              radius="sm"
+                              fit="cover"
+                              style={{ flexShrink: 0 }}
+                            />
+                            <Box style={{ minWidth: 0, flex: 1 }}>
+                              <Text fw={600} size="sm" lineClamp={2}>
+                                {job.title}
+                              </Text>
+                              <Group gap={6} mt={4} wrap="wrap">
+                                {job.status === "queued" && (
+                                  <Badge size="xs" color="gray" variant="light">
+                                    Queued
+                                  </Badge>
+                                )}
+                                {job.status === "loading" && (
+                                  <Badge
+                                    size="xs"
+                                    color="yellow"
+                                    variant="light"
+                                    leftSection={<Loader size={10} color="yellow" />}
+                                  >
+                                    Fetching…
+                                  </Badge>
+                                )}
+                                {job.status === "done" && (
+                                  <Badge
+                                    size="xs"
+                                    color="teal"
+                                    variant="light"
+                                    leftSection={<IconCheck size={10} />}
+                                  >
+                                    {job.segments.length} lines
+                                  </Badge>
+                                )}
+                                {job.status === "error" && (
+                                  <Badge size="xs" color="red" variant="light">
+                                    Failed
+                                  </Badge>
+                                )}
+                                <SourceBadge source={job.source} />
+                              </Group>
+                              {job.error && (
+                                <Text size="xs" c="red.4" mt={4} lineClamp={2}>
+                                  {job.error}
                                 </Text>
                               )}
-                            </Group>
-                            {job.error && (
-                              <Text size="xs" c="red.4" mt={4} lineClamp={2}>
-                                {job.error}
-                              </Text>
-                            )}
-                          </Box>
-                        </Group>
-                      </Paper>
-                    ))}
-                  </Stack>
-                </ScrollArea.Autosize>
-              </Stack>
-            </Paper>
+                            </Box>
+                          </Group>
+                        </Paper>
+                      ))}
+                    </Stack>
+                  </ScrollArea.Autosize>
+                </Stack>
+              </Paper>
+
+              <Paper
+                p="md"
+                withBorder
+                style={{
+                  background: "var(--mantine-color-dark-8)",
+                  borderColor: "var(--mantine-color-dark-5)",
+                }}
+              >
+                <Stack gap="sm">
+                  <Group gap={6}>
+                    <IconSparkles size={16} color="#ff0033" />
+                    <Text fw={600} size="sm">
+                      Custom prompt (all videos)
+                    </Text>
+                  </Group>
+                  <Text size="xs" c="dimmed">
+                    Your text is placed before every finished transcript, then opened in the selected AI.
+                  </Text>
+                  <Radio.Group
+                    value={aiProvider}
+                    onChange={(v) => setAiProvider(v as AiProvider)}
+                    name="aiProvider"
+                  >
+                    <Group gap="md">
+                      <Radio value="chatgpt" label="ChatGPT" size="xs" color="youtube" />
+                      <Radio value="claude" label="Claude" size="xs" color="youtube" />
+                      <Radio value="gemini" label="Gemini" size="xs" color="youtube" />
+                    </Group>
+                  </Radio.Group>
+                  <Textarea
+                    minRows={3}
+                    autosize
+                    maxRows={6}
+                    placeholder="e.g. Summarize key hiring tips in bullet points…"
+                    value={customPrompt}
+                    onChange={(e) => setCustomPrompt(e.currentTarget.value)}
+                    styles={inputStyles}
+                  />
+                  <Button
+                    color="youtube"
+                    leftSection={<IconSparkles size={16} />}
+                    disabled={!doneJobs.length}
+                    onClick={() => void runCustomPrompt()}
+                  >
+                    Open in{" "}
+                    {aiProvider === "chatgpt"
+                      ? "ChatGPT"
+                      : aiProvider === "claude"
+                        ? "Claude"
+                        : "Gemini"}
+                  </Button>
+                </Stack>
+              </Paper>
+            </Stack>
 
             {/* Right: transcript cards */}
             <Stack gap="md">
@@ -480,12 +603,7 @@ export function TranscriptApp() {
                   onChange={(e) => setFilter(e.currentTarget.value)}
                   flex={1}
                   size="xs"
-                  styles={{
-                    input: {
-                      background: "var(--mantine-color-dark-6)",
-                      borderColor: "var(--mantine-color-dark-4)",
-                    },
-                  }}
+                  styles={inputStyles}
                 />
               </Group>
 
@@ -541,26 +659,49 @@ export function TranscriptApp() {
                     }}
                   >
                     <Stack gap="sm">
-                      <Group justify="space-between" align="flex-start" wrap="wrap">
+                      <Group justify="space-between" align="flex-start" wrap="wrap" gap="sm">
                         <Box style={{ minWidth: 0, flex: 1 }}>
                           <Text fw={600} size="sm" lineClamp={2}>
                             {job.title}
                           </Text>
-                          {job.author && (
-                            <Text size="xs" c="dimmed" mt={2}>
-                              {job.author}
-                              {job.language ? ` · ${job.language}` : ""}
-                            </Text>
-                          )}
+                          <Group gap={6} mt={4} wrap="wrap">
+                            <SourceBadge source={job.source} />
+                            {job.author && (
+                              <Text size="xs" c="dimmed">
+                                {job.author}
+                                {job.language ? ` · ${job.language}` : ""}
+                              </Text>
+                            )}
+                          </Group>
                         </Box>
-                        <Button
-                          size="xs"
-                          variant="default"
-                          leftSection={<IconCopy size={14} />}
-                          onClick={() => void copyOne(job)}
-                        >
-                          Copy
-                        </Button>
+                        <Group gap={6} wrap="wrap">
+                          <Button
+                            size="xs"
+                            variant="default"
+                            leftSection={<IconCopy size={14} />}
+                            onClick={() => void copyOne(job)}
+                          >
+                            Copy
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="light"
+                            color="teal"
+                            leftSection={<IconSparkles size={14} />}
+                            onClick={() => void summarizeOne(job, "chatgpt")}
+                          >
+                            Summarize GPT
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="light"
+                            color="orange"
+                            leftSection={<IconSparkles size={14} />}
+                            onClick={() => void summarizeOne(job, "claude")}
+                          >
+                            Summarize Claude
+                          </Button>
+                        </Group>
                       </Group>
 
                       <ScrollArea.Autosize mah={360} type="auto" offsetScrollbars>

@@ -244,6 +244,7 @@ async function fetchViaTranscriptRelay(
     thumbnail: thumbnailUrl(videoId),
     segments,
     rawText,
+    source: "website",
   };
 }
 
@@ -281,6 +282,7 @@ async function fetchViaYoutubeDirect(
     thumbnail: videoDetails?.thumbnails?.[0]?.url || thumbnailUrl(videoId),
     segments,
     rawText,
+    source: "library",
   };
 }
 

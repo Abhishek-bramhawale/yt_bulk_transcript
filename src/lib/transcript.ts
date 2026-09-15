@@ -5,6 +5,8 @@ export type TranscriptSegment = {
   duration: number;
 };
 
+export type TranscriptSource = "library" | "website";
+
 export type TranscriptApiResponse = {
   videoId: string;
   title: string;
@@ -13,6 +15,8 @@ export type TranscriptApiResponse = {
   thumbnail: string;
   segments: TranscriptSegment[];
   rawText: string;
+  /** `library` = youtube-transcript-plus; `website` = youtube-transcript.ai relay */
+  source: TranscriptSource;
 };
 
 export const SAMPLE_VIDEOS = [
