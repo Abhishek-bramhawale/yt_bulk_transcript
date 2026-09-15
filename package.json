@@ -17,7 +17,9 @@
     "postcss-preset-mantine": "^1.18.0",
     "postcss-simple-vars": "^7.0.1",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "undici": "^8.10.2",
+    "youtube-transcript-plus": "^2.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

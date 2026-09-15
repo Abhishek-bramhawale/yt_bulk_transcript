@@ -28,10 +28,10 @@ import {
   IconSearch,
 } from "@tabler/icons-react";
 import {
-  MOCK_TRANSCRIPT,
   SAMPLE_VIDEOS,
   extractVideoId,
   thumbnailUrl,
+  type TranscriptApiResponse,
   type TranscriptSegment,
 } from "@/lib/transcript";
 
@@ -80,29 +80,33 @@ export function TranscriptApp() {
     setSegments([]);
     setFilter("");
 
-    // Part 1: mock delay + demo data (real API in later parts)
-    await new Promise((r) => setTimeout(r, 700));
-
     try {
-      const mock = MOCK_TRANSCRIPT[videoId];
-      if (!mock) {
-        throw new Error(
-          "No demo transcript for this video yet. Try a sample link — API wiring comes in a later part."
-        );
+      const res = await fetch(
+        `/api/transcript?videoId=${encodeURIComponent(videoId)}`,
+        { method: "GET" }
+      );
+      const payload = (await res.json()) as TranscriptApiResponse & {
+        error?: string;
+      };
+
+      if (!res.ok) {
+        throw new Error(payload.error || `Request failed (${res.status})`);
       }
 
       setMeta({
-        id: videoId,
-        title: mock.title,
-        stats: `Language: ${mock.language}`,
-        thumb: thumbnailUrl(videoId),
+        id: payload.videoId,
+        title: payload.title,
+        stats: [
+          payload.author ? `Channel: ${payload.author}` : null,
+          payload.language ? `Language: ${payload.language}` : null,
+          `${payload.segments.length} lines`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        thumb: payload.thumbnail || thumbnailUrl(payload.videoId),
       });
-      setSegments(mock.segments);
-      setRawText(
-        mock.segments
-          .map((s) => (s.time ? `[${s.time}] ${s.text}` : s.text))
-          .join("\n")
-      );
+      setSegments(payload.segments);
+      setRawText(payload.rawText);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load transcript.");
       setSegments([]);
@@ -156,8 +160,8 @@ export function TranscriptApp() {
           <Text c="dimmed" size="md">
             Paste any YouTube video link to extract subtitles & captions instantly
           </Text>
-          <Badge variant="light" color="gray" size="sm" mx="auto" mt={4}>
-            Part 1 · UI only (demo data)
+          <Badge variant="light" color="youtube" size="sm" mx="auto" mt={4}>
+            Live API · Vercel serverless
           </Badge>
         </Stack>
 
@@ -341,7 +345,7 @@ export function TranscriptApp() {
                     ) : (
                       filtered.map((item, i) => (
                         <Group
-                          key={`${item.time}-${i}`}
+                          key={`${item.offset}-${i}`}
                           gap="md"
                           wrap="nowrap"
                           align="flex-start"
