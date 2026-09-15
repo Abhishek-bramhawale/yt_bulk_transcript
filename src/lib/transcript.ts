@@ -36,10 +36,41 @@ export function extractVideoId(url: string): string | null {
   const trimmed = url.trim();
   if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed;
 
-  const regExp =
-    /(?:youtube\.com\/(?:[^/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=|shorts\/|live\/)|youtu\.be\/)([^"&?/\s]{11})/;
-  const match = trimmed.match(regExp);
-  return match ? match[1] : null;
+  const ids = extractAllVideoIds(trimmed);
+  return ids[0] ?? null;
+}
+
+/**
+ * Pull every YouTube video ID from arbitrary text (JSON, mixed lines, pasted API payloads, etc.).
+ * Dedupes while preserving first-seen order.
+ */
+export function extractAllVideoIds(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  const push = (id: string | undefined) => {
+    if (!id || id.length !== 11 || seen.has(id)) return;
+    if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) return;
+    seen.add(id);
+    out.push(id);
+  };
+
+  // Full / partial YouTube URLs anywhere in the blob (same line, JSON, quotes, etc.)
+  const urlRe =
+    /(?:https?:\/\/)?(?:www\.)?(?:m\.)?(?:youtube\.com\/(?:watch\?(?:[^"\s<>]*&)?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = urlRe.exec(text)) !== null) {
+    push(match[1]);
+  }
+
+  // Bare 11-char IDs only when the whole line is just the id (avoid false hits like "TRANSACTION")
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim().replace(/^["']|["']$/g, "");
+    if (/^[a-zA-Z0-9_-]{11}$/.test(t)) push(t);
+  }
+
+  return out;
 }
 
 export function thumbnailUrl(videoId: string) {

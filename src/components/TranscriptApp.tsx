@@ -37,7 +37,7 @@ import {
 import { openAiWithPrompt, type AiProvider } from "@/lib/open-ai";
 import {
   SAMPLE_VIDEOS,
-  extractVideoId,
+  extractAllVideoIds,
   thumbnailUrl,
   type TranscriptApiResponse,
   type TranscriptSegment,
@@ -62,17 +62,8 @@ type TranscriptJob = {
 };
 
 function parseUrlList(text: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const part of text.split(/[\n,]+/)) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    const id = extractVideoId(trimmed);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(trimmed);
-  }
-  return out;
+  // Accepts JSON dumps, mixed text, multiple URLs on one line, etc.
+  return extractAllVideoIds(text);
 }
 
 function segmentsToPlain(segments: TranscriptSegment[], withTimestamps: boolean) {
@@ -211,19 +202,21 @@ export function TranscriptApp() {
   async function startBulk(overrideText?: string) {
     const list = parseUrlList(overrideText ?? urlText);
     if (!list.length) {
-      setFormError("Paste at least one valid YouTube URL or video ID (one per line).");
+      setFormError(
+        "No YouTube links found. Paste URLs, video IDs, or JSON containing ytLink/youtube URLs."
+      );
       return;
     }
 
     setFormError(null);
     setFilter("");
 
-    const nextJobs: TranscriptJob[] = list.map((input, i) => {
-      const videoId = extractVideoId(input)!;
+    // parseUrlList now returns unique video IDs (from any mixed/JSON paste)
+    const nextJobs: TranscriptJob[] = list.map((videoId, i) => {
       return {
         id: `${videoId}-${Date.now()}-${i}`,
         videoId,
-        input,
+        input: `https://youtu.be/${videoId}`,
         status: "queued" as const,
         title: `Video ID: ${videoId}`,
         author: null,
@@ -372,7 +365,7 @@ export function TranscriptApp() {
                 maxRows={8}
                 autosize
                 placeholder={
-                  "Paste YouTube URLs (one per line)\nhttps://www.youtube.com/watch?v=...\nhttps://youtu.be/..."
+                  "Paste YouTube URLs, IDs, or even JSON dumps — links are auto-detected\nhttps://youtu.be/...\nor { \"ytLink\": \"https://youtu.be/...\" }"
                 }
                 value={urlText}
                 onChange={(e) => setUrlText(e.currentTarget.value)}
