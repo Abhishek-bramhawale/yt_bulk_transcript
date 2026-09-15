@@ -34,7 +34,6 @@ function proxyFetchFactory() {
   const proxyUrl = process.env.YT_PROXY_URL?.trim();
   if (!proxyUrl) return undefined;
 
-  // undici is only needed when a proxy is configured
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const undici = require("undici") as typeof import("undici");
   const agent = new undici.ProxyAgent(proxyUrl);
@@ -69,7 +68,6 @@ function proxyFetchFactory() {
         ...headers,
       },
     });
-    // undici Response is fetch-compatible enough for the library
     return res as unknown as Response;
   };
 }
@@ -79,8 +77,8 @@ function buildConfig(lang?: string): TranscriptConfig & { videoDetails: true } {
   const base: TranscriptConfig & { videoDetails: true } = {
     lang,
     userAgent: browserUserAgent(),
-    retries: 2,
-    retryDelay: 800,
+    retries: 1,
+    retryDelay: 600,
     videoDetails: true,
   };
 
@@ -91,6 +89,181 @@ function buildConfig(lang?: string): TranscriptConfig & { videoDetails: true } {
     videoFetch: proxied,
     playerFetch: proxied,
     transcriptFetch: proxied,
+  };
+}
+
+/** Convert `m:ss` / `h:mm:ss` → seconds */
+function parseTimestampToSeconds(time: string): number {
+  const parts = time.split(":").map((p) => Number(p));
+  if (parts.some((n) => !Number.isFinite(n))) return 0;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return 0;
+}
+
+function shouldTryFallback(err: unknown): boolean {
+  // On Vercel, YouTube often returns "not available" / rate-limit / bot blocks
+  // even when captions exist — retry via public relay.
+  if (
+    err instanceof YoutubeTranscriptNotAvailableError ||
+    err instanceof YoutubeTranscriptNotAvailableLanguageError ||
+    err instanceof YoutubeTranscriptTooManyRequestError ||
+    err instanceof YoutubeTranscriptDisabledError
+  ) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /blocked|captcha|sign in|bot|429|503|timeout|fetch failed|ECONNRESET|ENOTFOUND/i.test(
+    msg
+  );
+}
+
+async function fetchOEmbed(videoId: string): Promise<{
+  title: string | null;
+  author: string | null;
+}> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(
+        `https://www.youtube.com/watch?v=${videoId}`
+      )}&format=json`,
+      {
+        headers: { "User-Agent": browserUserAgent() },
+        next: { revalidate: 3600 },
+      }
+    );
+    if (!res.ok) return { title: null, author: null };
+    const data = (await res.json()) as { title?: string; author_name?: string };
+    return {
+      title: data.title ?? null,
+      author: data.author_name ?? null,
+    };
+  } catch {
+    return { title: null, author: null };
+  }
+}
+
+/**
+ * Public relay used when YouTube blocks datacenter IPs (Vercel).
+ * Same source as the original static HTML prototype.
+ */
+async function fetchViaTranscriptRelay(
+  videoId: string
+): Promise<TranscriptApiResponse> {
+  const relayBase =
+    process.env.YT_TRANSCRIPT_RELAY_URL?.replace(/\/$/, "") ||
+    "https://youtube-transcript.ai/transcript";
+
+  const res = await fetch(`${relayBase}/${videoId}.txt`, {
+    headers: {
+      "User-Agent": browserUserAgent(),
+      Accept: "text/plain,*/*",
+    },
+    // Don't cache failures aggressively on the edge of our function
+    cache: "no-store",
+  });
+
+  if (res.status === 404) {
+    throw new YoutubeTranscriptNotAvailableError(videoId);
+  }
+  if (!res.ok) {
+    throw new Error(`Transcript relay failed (status ${res.status}).`);
+  }
+
+  const raw = await res.text();
+  if (!raw.trim()) {
+    throw new YoutubeTranscriptNotAvailableError(videoId);
+  }
+
+  let title = "";
+  let language: string | null = null;
+  const segments: TranscriptSegment[] = [];
+
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith("# Transcript:")) {
+      title = line.replace("# Transcript:", "").trim();
+      continue;
+    }
+    if (line.startsWith("Language:")) {
+      language = line.replace("Language:", "").trim() || null;
+      continue;
+    }
+    if (line.startsWith("Source video:") || line.startsWith("To request")) {
+      continue;
+    }
+
+    const match = line.match(/^\[([0-9:]+)\]\s*(.+)$/);
+    if (match) {
+      const time = match[1];
+      const text = match[2].replace(/\s+/g, " ").trim();
+      const offset = parseTimestampToSeconds(time);
+      segments.push({ time, text, offset, duration: 0 });
+      continue;
+    }
+
+    if (line.length > 0) {
+      segments.push({ time: "", text: line, offset: 0, duration: 0 });
+    }
+  }
+
+  if (segments.length === 0) {
+    throw new YoutubeTranscriptNotAvailableError(videoId);
+  }
+
+  const oembed = await fetchOEmbed(videoId);
+  const rawText = segments
+    .map((s) => (s.time ? `[${s.time}] ${s.text}` : s.text))
+    .join("\n");
+
+  return {
+    videoId,
+    title: title || oembed.title || `YouTube Video (${videoId})`,
+    author: oembed.author,
+    language,
+    thumbnail: thumbnailUrl(videoId),
+    segments,
+    rawText,
+  };
+}
+
+async function fetchViaYoutubeDirect(
+  videoId: string,
+  lang?: string
+): Promise<TranscriptApiResponse> {
+  const result: TranscriptResult = await fetchTranscript(
+    videoId,
+    buildConfig(lang)
+  );
+  const { videoDetails, segments: rawSegments } = result;
+
+  const segments: TranscriptSegment[] = rawSegments.map((s: YtSegment) => ({
+    time: formatTimestamp(s.offset),
+    text: s.text.replace(/\s+/g, " ").trim(),
+    offset: s.offset,
+    duration: s.duration,
+  }));
+
+  if (segments.length === 0) {
+    throw new YoutubeTranscriptNotAvailableError(videoId);
+  }
+
+  const language = rawSegments[0]?.lang ?? lang ?? null;
+  const rawText = segments
+    .map((s) => (s.time ? `[${s.time}] ${s.text}` : s.text))
+    .join("\n");
+
+  return {
+    videoId,
+    title: videoDetails?.title || `YouTube Video (${videoId})`,
+    author: videoDetails?.author ?? null,
+    language,
+    thumbnail: videoDetails?.thumbnails?.[0]?.url || thumbnailUrl(videoId),
+    segments,
+    rawText,
   };
 }
 
@@ -125,7 +298,6 @@ export function mapErrorMessage(err: unknown): { status: number; message: string
   }
 
   const msg = err instanceof Error ? err.message : "Failed to fetch transcript.";
-  // Common IP-block wording from YouTube / libraries
   if (/blocked|captcha|sign in|bot/i.test(msg)) {
     return {
       status: 503,
@@ -137,6 +309,10 @@ export function mapErrorMessage(err: unknown): { status: number; message: string
   return { status: 500, message: msg };
 }
 
+/**
+ * 1) Direct YouTube (works locally / with proxy)
+ * 2) Public relay fallback (works on Vercel when YouTube blocks datacenter IPs)
+ */
 export async function getTranscriptForVideo(
   input: string,
   lang?: string
@@ -146,32 +322,49 @@ export async function getTranscriptForVideo(
     throw new YoutubeTranscriptInvalidVideoIdError();
   }
 
-  const result: TranscriptResult = await fetchTranscript(videoId, buildConfig(lang));
-  const { videoDetails, segments: rawSegments } = result;
+  const preferRelay =
+    process.env.YT_PREFER_RELAY === "1" ||
+    process.env.YT_PREFER_RELAY === "true" ||
+    // Vercel datacenter IPs are usually blocked by YouTube — use relay first unless disabled
+    (process.env.VERCEL === "1" &&
+      process.env.YT_PREFER_RELAY !== "0" &&
+      !process.env.YT_PROXY_URL?.trim());
 
-  const segments: TranscriptSegment[] = rawSegments.map((s: YtSegment) => ({
-    time: formatTimestamp(s.offset),
-    text: s.text.replace(/\s+/g, " ").trim(),
-    offset: s.offset,
-    duration: s.duration,
-  }));
-
-  if (segments.length === 0) {
-    throw new YoutubeTranscriptNotAvailableError(videoId);
+  if (preferRelay) {
+    try {
+      return await fetchViaTranscriptRelay(videoId);
+    } catch {
+      // fall through to direct
+    }
+    return fetchViaYoutubeDirect(videoId, lang);
   }
 
-  const language = rawSegments[0]?.lang ?? lang ?? null;
-  const rawText = segments
-    .map((s) => (s.time ? `[${s.time}] ${s.text}` : s.text))
-    .join("\n");
+  try {
+    return await fetchViaYoutubeDirect(videoId, lang);
+  } catch (err) {
+    // Don't fallback for clearly invalid / unavailable videos
+    if (
+      err instanceof YoutubeTranscriptInvalidVideoIdError ||
+      err instanceof YoutubeTranscriptVideoUnavailableError
+    ) {
+      throw err;
+    }
 
-  return {
-    videoId,
-    title: videoDetails?.title || `YouTube Video (${videoId})`,
-    author: videoDetails?.author ?? null,
-    language,
-    thumbnail: videoDetails?.thumbnails?.[0]?.url || thumbnailUrl(videoId),
-    segments,
-    rawText,
-  };
+    if (!shouldTryFallback(err)) {
+      throw err;
+    }
+
+    try {
+      return await fetchViaTranscriptRelay(videoId);
+    } catch (relayErr) {
+      // Prefer a clear "not available" if both failed that way
+      if (
+        relayErr instanceof YoutubeTranscriptNotAvailableError ||
+        err instanceof YoutubeTranscriptNotAvailableError
+      ) {
+        throw new YoutubeTranscriptNotAvailableError(videoId);
+      }
+      throw relayErr;
+    }
+  }
 }
